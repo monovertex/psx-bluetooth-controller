@@ -60,16 +60,35 @@ int buttons[14] = {
   PSB_R1, PSB_R2,
   PSB_SELECT, PSB_START
 };
-
 int buttonKeyCodes[14] = {
-  HID_KEY_Q, HID_KEY_R, HID_KEY_S, HID_KEY_T,
+  HID_KEY_Q, HID_KEY_W, HID_KEY_E, HID_KEY_R,
   HID_KEY_ARROW_UP, HID_KEY_ARROW_RIGHT, HID_KEY_ARROW_DOWN, HID_KEY_ARROW_LEFT,
   HID_KEY_A, HID_KEY_S,
-  HID_KEY_D, HID_KEY_F,
-  HID_KEY_TAB, HID_KEY_RETURN
+  HID_KEY_Z, HID_KEY_X,
+  HID_KEY_SPACE, HID_KEY_RETURN
 };
 
-int pressedKeyCodes[14] = { 0 };
+// Axis constants to read from gamepad info.
+int joystickAxis[8] = { PSS_LX, PSS_LX, PSS_LY, PSS_LY, PSS_RX, PSS_RX, PSS_RY, PSS_RY };
+
+// The limits for each axis defined above.
+int joystickLimits[8][2] = {
+  { 0, 80 }, { 176, 256 },
+  { 0, 80 }, { 176, 256 },
+  { 0, 80 }, { 176, 256 },
+  { 0, 80 }, { 176, 256 }
+};
+
+// The key code to send if the axis value is within the limits defined above.
+int joystickKeyCodes[8] = { 
+   HID_KEY_F, HID_KEY_H,
+   HID_KEY_T, HID_KEY_G,
+   HID_KEY_J, HID_KEY_L,
+   HID_KEY_I, HID_KEY_K
+};
+
+int pressedKeyCodes[22] = { 0 };
+int previousPressedKeyCodes[22] = { 0 };
 
 unsigned int buttonState = 0;
 
@@ -99,6 +118,8 @@ void setup(void) {
   Serial.print(F("--> Initializing the Bluefruit LE module: "));
   if (!ble.begin(VERBOSE_MODE)) { error(F("ERROR: Could not find the module.")); }
   Serial.println(F("OK!"));
+
+  ble.disconnect();
 
   /* Perform a factory reset to make sure everything is in a known state. */
   if (FACTORYRESET_ENABLE) {
@@ -143,34 +164,56 @@ void setup(void) {
 // LOOP
 /*********************************************************************************/
 void loop() {
+  delay(GAMEPAD_READ_DELAY);
+  
   gamepad.read_gamepad(false, 0);
 
-  unsigned int currentButtonState = gamepad.ButtonDataByte();
-  if (buttonState == currentButtonState) { return; }
-  buttonState = currentButtonState;
-
+  // Reset pressed key codes.
   memset(pressedKeyCodes, 0, sizeof(pressedKeyCodes));
-  int pressedIndex = 0;
-  int i;
-  
-  for (i = 0; i < 14; i++) {
-    if (!gamepad.Button(buttons[i])) { continue; }
-    pressedKeyCodes[pressedIndex] = buttonKeyCodes[i];
-    pressedIndex++;
-  }
 
+  // Grab all data.
+  int pressedIndex = 0;
+  getButtonInfo(&pressedIndex, pressedKeyCodes);
+  getJoystickInfo(&pressedIndex, pressedKeyCodes);
+
+  // If the pressed keys are the same as above, don't send an update.
+  if (!memcmp(pressedKeyCodes, previousPressedKeyCodes, sizeof(pressedKeyCodes))) { return; }
+
+  // Preserve the pressed keys state, to use in the comparison.
+  memcpy(previousPressedKeyCodes, pressedKeyCodes, sizeof(pressedKeyCodes));
+
+  // We support max 5 pressed buttons, so grab the first five and send them to the BLE.
   String command = String("AT+BLEKEYBOARDCODE=00-00");
   for (int i = 0; i < 5; i++) {
     command += String("-") + printHex(pressedKeyCodes[i]);
   }
   
-  Serial.print("Sending key code '");
-  Serial.print(command);
-  Serial.println("': ");
+//  Serial.print("Sending key code '");
+//  Serial.print(command);
+//  Serial.println("': ");
   
   ble.println(command);
   if (ble.waitForOK()) { Serial.println(F("OK!")); }
   else { Serial.println(F("FAILED!")); }
-  
-  delay(GAMEPAD_READ_DELAY);
+}
+
+void getButtonInfo(int* pressedIndex, int pressedKeys[]) {
+  unsigned int currentButtonState = gamepad.ButtonDataByte();
+  if (buttonState == currentButtonState) { return; }
+  buttonState = currentButtonState;
+
+  for (int i = 0; i < 14; i++) {
+    if (!gamepad.Button(buttons[i])) { continue; }
+    pressedKeyCodes[*pressedIndex] = buttonKeyCodes[i];
+    (*pressedIndex)++;
+  }
+}
+
+void getJoystickInfo(int* pressedIndex, int pressedKeys[]) {
+  for (int i = 0; i < 8; i++) {
+    int value = gamepad.Analog(joystickAxis[i]);
+    if (value < joystickLimits[i][0] || joystickLimits[i][1] < value)  { continue; }
+    pressedKeyCodes[*pressedIndex] = joystickKeyCodes[i];
+    (*pressedIndex)++;
+  }
 }
