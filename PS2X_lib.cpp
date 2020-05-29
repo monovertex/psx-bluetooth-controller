@@ -58,10 +58,11 @@ unsigned char PS2X::_gamepad_shiftinout (char byte) {
    for(unsigned char i=0;i<8;i++) {
       if(CHK(byte,i)) CMD_SET();
       else CMD_CLR();
-
+    
       CLK_CLR();
       delayMicroseconds(CTRL_CLK);
 
+      //if(DAT_CHK()) SET(tmp,i);
       if(DAT_CHK()) bitSet(tmp,i);
 
       CLK_SET();
@@ -114,8 +115,8 @@ boolean PS2X::read_gamepad(boolean motor1, byte motor2) {
       }
 
       ATT_SET(); // HI disable joystick
-      // Check to see if we received valid data or not.
-      // We should be in analog mode for our data to be valid (analog == 0x7_)
+      // Check to see if we received valid data or not.  
+    // We should be in analog mode for our data to be valid (analog == 0x7_)
       if ((PS2data[1] & 0xf0) == 0x70)
          break;
 
@@ -148,7 +149,12 @@ boolean PS2X::read_gamepad(boolean motor1, byte motor2) {
 #endif
 
    last_buttons = buttons; //store the previous buttons states
+
+#if defined(__AVR__)
+   buttons = *(uint16_t*)(PS2data+3);   //store as one value for multiple functions
+#else
    buttons =  (uint16_t)(PS2data[4] << 8) + PS2data[3];   //store as one value for multiple functions
+#endif
    last_read = millis();
    return ((PS2data[1] & 0xf0) == 0x70);  // 1 = OK = analog mode - 0 = NOK
 }
@@ -163,15 +169,44 @@ byte PS2X::config_gamepad(uint8_t clk, uint8_t cmd, uint8_t att, uint8_t dat, bo
 
   byte temp[sizeof(type_read)];
 
-  pin_clk = clk;
-  pin_cmd = cmd;
-  pin_att = att;
-  pin_dat = dat;
+#ifdef __AVR__
+  _clk_mask = digitalPinToBitMask(clk);
+  _clk_oreg = portOutputRegister(digitalPinToPort(clk));
+  _cmd_mask = digitalPinToBitMask(cmd);
+  _cmd_oreg = portOutputRegister(digitalPinToPort(cmd));
+  _att_mask = digitalPinToBitMask(att);
+  _att_oreg = portOutputRegister(digitalPinToPort(att));
+  _dat_mask = digitalPinToBitMask(dat);
+  _dat_ireg = portInputRegister(digitalPinToPort(dat));
+#else
+  uint32_t            lport;                   // Port number for this pin
+  _clk_mask = digitalPinToBitMask(clk);
+  lport = digitalPinToPort(clk);
+  _clk_lport_set = portOutputRegister(lport) + 2;
+  _clk_lport_clr = portOutputRegister(lport) + 1;
+
+  _cmd_mask = digitalPinToBitMask(cmd);
+  lport = digitalPinToPort(cmd);
+  _cmd_lport_set = portOutputRegister(lport) + 2;
+  _cmd_lport_clr = portOutputRegister(lport) + 1;
+
+  _att_mask = digitalPinToBitMask(att);
+  lport = digitalPinToPort(att);
+  _att_lport_set = portOutputRegister(lport) + 2;
+  _att_lport_clr = portOutputRegister(lport) + 1;
+
+  _dat_mask = digitalPinToBitMask(dat);
+  _dat_lport = portInputRegister(digitalPinToPort(dat));
+#endif
 
   pinMode(clk, OUTPUT); //configure ports
   pinMode(att, OUTPUT);
   pinMode(cmd, OUTPUT);
-  pinMode(dat, INPUT_PULLUP);
+  pinMode(dat, INPUT);
+
+#if defined(__AVR__)
+  digitalWrite(dat, HIGH); //enable pull-up
+#endif
 
   CMD_SET(); // SET(*_cmd_oreg,_cmd_mask);
   CLK_SET();
@@ -180,9 +215,9 @@ byte PS2X::config_gamepad(uint8_t clk, uint8_t cmd, uint8_t att, uint8_t dat, bo
   read_gamepad();
   read_gamepad();
 
-  //see if it talked - see if mode came back.
+  //see if it talked - see if mode came back. 
   //If still anything but 41, 73 or 79, then it's not talking
-  if(PS2data[1] != 0x41 && PS2data[1] != 0x73 && PS2data[1] != 0x79){
+  if(PS2data[1] != 0x41 && PS2data[1] != 0x73 && PS2data[1] != 0x79){ 
 #ifdef PS2X_DEBUG
     Serial.println("Controller mode not matched or no controller found");
     Serial.print("Expected 0x41, 0x73 or 0x79, but got ");
@@ -276,13 +311,40 @@ void PS2X::sendCommandString(byte string[], byte len) {
 
 /****************************************************************************************/
 byte PS2X::readType() {
+/*
+  byte temp[sizeof(type_read)];
+
+  sendCommandString(enter_config, sizeof(enter_config));
+
+  delayMicroseconds(CTRL_BYTE_DELAY);
+
+  CMD_SET();
+  CLK_SET();
+  ATT_CLR(); // low enable joystick
+
+  delayMicroseconds(CTRL_BYTE_DELAY);
+
+  for (int i = 0; i<9; i++) {
+    temp[i] = _gamepad_shiftinout(type_read[i]);
+  }
+
+  sendCommandString(exit_config, sizeof(exit_config));
+
+  if(temp[3] == 0x03)
+    return 1;
+  else if(temp[3] == 0x01)
+    return 2;
+
+  return 0;
+*/
+
   if(controller_type == 0x03)
     return 1;
   else if(controller_type == 0x01)
     return 2;
-  else if(controller_type == 0x0C)
+  else if(controller_type == 0x0C)  
     return 3;  //2.4G Wireless Dual Shock PS2 Game Controller
-
+  
   return 0;
 }
 
@@ -322,32 +384,81 @@ void PS2X::reconfig_gamepad(){
 }
 
 /****************************************************************************************/
-
-// On pic32, use the set/clr registers to make them atomic...
+#ifdef __AVR__
 inline void  PS2X::CLK_SET(void) {
-  digitalWrite(pin_clk, HIGH);
+  register uint8_t old_sreg = SREG;
+  cli();
+  *_clk_oreg |= _clk_mask;
+  SREG = old_sreg;
 }
 
 inline void  PS2X::CLK_CLR(void) {
-  digitalWrite(pin_clk, LOW);
+  register uint8_t old_sreg = SREG;
+  cli();
+  *_clk_oreg &= ~_clk_mask;
+  SREG = old_sreg;
 }
 
 inline void  PS2X::CMD_SET(void) {
-  digitalWrite(pin_cmd, HIGH);
+  register uint8_t old_sreg = SREG;
+  cli();
+  *_cmd_oreg |= _cmd_mask; // SET(*_cmd_oreg,_cmd_mask);
+  SREG = old_sreg;
 }
 
 inline void  PS2X::CMD_CLR(void) {
-  digitalWrite(pin_cmd, LOW);
+  register uint8_t old_sreg = SREG;
+  cli();
+  *_cmd_oreg &= ~_cmd_mask; // SET(*_cmd_oreg,_cmd_mask);
+  SREG = old_sreg;
 }
 
 inline void  PS2X::ATT_SET(void) {
-  digitalWrite(pin_att, HIGH);
+  register uint8_t old_sreg = SREG;
+  cli();
+  *_att_oreg |= _att_mask ;
+  SREG = old_sreg;
 }
 
 inline void PS2X::ATT_CLR(void) {
-  digitalWrite(pin_att, LOW);
+  register uint8_t old_sreg = SREG;
+  cli();
+  *_att_oreg &= ~_att_mask;
+  SREG = old_sreg;
 }
 
 inline bool PS2X::DAT_CHK(void) {
-  return (digitalRead(pin_dat) == HIGH);
+  return (*_dat_ireg & _dat_mask) ? true : false;
 }
+
+#else
+// On pic32, use the set/clr registers to make them atomic...
+inline void  PS2X::CLK_SET(void) {
+  *_clk_lport_set |= _clk_mask;
+}
+
+inline void  PS2X::CLK_CLR(void) {
+  *_clk_lport_clr |= _clk_mask;
+}
+
+inline void  PS2X::CMD_SET(void) {
+  *_cmd_lport_set |= _cmd_mask;
+}
+
+inline void  PS2X::CMD_CLR(void) {
+  *_cmd_lport_clr |= _cmd_mask;
+}
+
+inline void  PS2X::ATT_SET(void) {
+  *_att_lport_set |= _att_mask;
+}
+
+inline void PS2X::ATT_CLR(void) {
+  *_att_lport_clr |= _att_mask;
+}
+
+inline bool PS2X::DAT_CHK(void) {
+  return (*_dat_lport & _dat_mask) ? true : false;
+}
+
+#endif

@@ -52,16 +52,14 @@
 *   Changed config_gamepad() call to include rumble and pressures options
 *     This was to fix controllers that will only go into config mode once
 *     Old methods should still work for backwards compatibility 
-* 1.7
+*    1.7
 *   Integrated Kurt's fixes for the interrupts messing with servo signals
 *   Reorganized directory so examples show up in Arduino IDE menu
-* 1.8
-*   Added Arduino 1.0 compatibility.
-* 1.9
-*   Kurt - Added detection and recovery from dropping from analog mode, plus
-*     integreated Chipkit (pic32mx...) support
-* 2019/03/14 - @monovertex
-*   Removed AVR support & updated the library to work with Adafruit Feather M0 Bluefruit LE
+*    1.8
+*   Added Arduino 1.0 compatibility. 
+*    1.9
+*       Kurt - Added detection and recovery from dropping from analog mode, plus
+*       integreated Chipkit (pic32mx...) support
 *
 *
 *
@@ -91,11 +89,18 @@ GNU General Public License for more details.
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
-
-#include <pins_arduino.h>
-#define CTRL_CLK        5
-#define CTRL_CLK_HIGH   5
-#define CTRL_BYTE_DELAY 4
+#ifdef __AVR__
+  // AVR
+  #include <avr/io.h>
+  #define CTRL_CLK        4
+  #define CTRL_BYTE_DELAY 3
+#else
+  // Pic32...
+  #include <pins_arduino.h>
+  #define CTRL_CLK        5
+  #define CTRL_CLK_HIGH   5
+  #define CTRL_BYTE_DELAY 4
+#endif 
 
 //These are our button constants
 #define PSB_SELECT      0x0001
@@ -192,11 +197,31 @@ class PS2X {
     unsigned char i;
     unsigned int last_buttons;
     unsigned int buttons;
-
-    uint8_t pin_clk;
-    uint8_t pin_cmd;
-    uint8_t pin_att;
-    uint8_t pin_dat;
+  
+    #ifdef __AVR__
+      uint8_t maskToBitNum(uint8_t);
+      uint8_t _clk_mask; 
+      volatile uint8_t *_clk_oreg;
+      uint8_t _cmd_mask; 
+      volatile uint8_t *_cmd_oreg;
+      uint8_t _att_mask; 
+      volatile uint8_t *_att_oreg;
+      uint8_t _dat_mask; 
+      volatile uint8_t *_dat_ireg;
+    #else
+      uint8_t maskToBitNum(uint8_t);
+      uint16_t _clk_mask; 
+      volatile uint32_t *_clk_lport_set;
+      volatile uint32_t *_clk_lport_clr;
+      uint16_t _cmd_mask; 
+      volatile uint32_t *_cmd_lport_set;
+      volatile uint32_t *_cmd_lport_clr;
+      uint16_t _att_mask; 
+      volatile uint32_t *_att_lport_set;
+      volatile uint32_t *_att_lport_clr;
+      uint16_t _dat_mask; 
+      volatile uint32_t *_dat_lport;
+    #endif
   
     unsigned long last_read;
     byte read_delay;
