@@ -21,76 +21,45 @@
 
 // LIBRARIES
 /*********************************************************************************/
-#include <SPI.h>
-#include "Adafruit_BLE.h"
-#include "Adafruit_BluefruitLE_SPI.h"
-#include "Adafruit_BluefruitLE_UART.h"
-#include "BluefruitConfig.h"
 #include "PS2X_lib.h"
-#include "HID_Keycodes.h"
+#include <SoftwareSerial.h>
 /*********************************************************************************/
 
 
 // CONFIGURATION & CONSTANTS
 /*********************************************************************************/
-#define FACTORYRESET_ENABLE 1
-#define PSX_DAT             5
-#define PSX_CMD             6
-#define PSX_ATT             9
-#define PSX_CLK             10
-#define ANALOG_DEADZONE     25
-#define GAMEPAD_READ_DELAY  50
-#define SERIAL_RATE         115200
+#define PSX_DAT             11
+#define PSX_CMD             10
+#define PSX_ATT             5
+#define PSX_CLK             4
+#define BT_RX               2
+#define BT_TX               3
+#define AXIS_DEADZONE       40
+#define AXIS_RANGE_CENTER   128
+#define AXIS_NOISE_LIMIT    2
+#define GAMEPAD_READ_DELAY  5
+#define SERIAL_RATE         9600
+#define BT_SERIAL_RATE      9600
+#define INITIAL_DELAY       500
+#define DEBUG_TO_SERIAL
 /*********************************************************************************/
 
 
 // OBJECT INSTANTIATION
 /*********************************************************************************/
-Adafruit_BluefruitLE_SPI ble(BLUEFRUIT_SPI_CS, BLUEFRUIT_SPI_IRQ, BLUEFRUIT_SPI_RST);
 PS2X gamepad;
+SoftwareSerial BTSerial(BT_RX, BT_TX);
 /*********************************************************************************/
 
 
 // GLOBALS & HELPERS
 /*********************************************************************************/
-int buttons[14] = {
-  PSB_TRIANGLE, PSB_CIRCLE, PSB_CROSS, PSB_SQUARE,
-  PSB_PAD_UP, PSB_PAD_RIGHT, PSB_PAD_DOWN, PSB_PAD_LEFT,
-  PSB_L1, PSB_L2,
-  PSB_R1, PSB_R2,
-  PSB_SELECT, PSB_START
-};
-int buttonKeyCodes[14] = {
-  HID_KEY_Q, HID_KEY_W, HID_KEY_E, HID_KEY_R,
-  HID_KEY_ARROW_UP, HID_KEY_ARROW_RIGHT, HID_KEY_ARROW_DOWN, HID_KEY_ARROW_LEFT,
-  HID_KEY_A, HID_KEY_S,
-  HID_KEY_Z, HID_KEY_X,
-  HID_KEY_SPACE, HID_KEY_RETURN
-};
-
-// Axis constants to read from gamepad info.
-int joystickAxis[8] = { PSS_LX, PSS_LX, PSS_LY, PSS_LY, PSS_RX, PSS_RX, PSS_RY, PSS_RY };
-
-// The limits for each axis defined above.
-int joystickLimits[8][2] = {
-  { 0, 80 }, { 176, 256 },
-  { 0, 80 }, { 176, 256 },
-  { 0, 80 }, { 176, 256 },
-  { 0, 80 }, { 176, 256 }
-};
-
-// The key code to send if the axis value is within the limits defined above.
-int joystickKeyCodes[8] = { 
-   HID_KEY_F, HID_KEY_H,
-   HID_KEY_T, HID_KEY_G,
-   HID_KEY_J, HID_KEY_L,
-   HID_KEY_I, HID_KEY_K
-};
-
-int pressedKeyCodes[22] = { 0 };
-int previousPressedKeyCodes[22] = { 0 };
-
-unsigned int buttonState = 0;
+bool isGamepadInitialized = false;
+uint32_t previousButtonState = 0;
+int8_t previousX1 = 0;
+int8_t previousY1 = 0;
+int8_t previousX2 = 0;
+int8_t previousY2 = 0;
 
 // Error helper function.
 void error(const __FlashStringHelper*err) {
@@ -98,10 +67,15 @@ void error(const __FlashStringHelper*err) {
   while (1);
 }
 
-String printHex(int input) {
-  char s[2];
-  sprintf(s, "%02x", input);
-  return String(s);
+int8_t readAxis(int axisIdentifier) { 
+  int rawValue = gamepad.Analog(axisIdentifier);
+  int normalizedValue = rawValue - AXIS_RANGE_CENTER;
+  if (abs(normalizedValue) < AXIS_DEADZONE) { return 0; }
+  return (int8_t)normalizedValue;
+}
+
+bool areAxisValuesEqual(int8_t valueA, int8_t valueB) {
+  return abs(valueA - valueB) <= AXIS_NOISE_LIMIT;
 }
 /*********************************************************************************/
 
@@ -109,54 +83,13 @@ String printHex(int input) {
 // SETUP
 /*********************************************************************************/
 void setup(void) {
-  delay(1000);
-
   Serial.begin(SERIAL_RATE);
-  Serial.println(F("=== Adafruit Feather M0 Bluefruit LE Gamepad ==="));
-  Serial.println(F("------------------------------------------------"));
+  BTSerial.begin(BT_SERIAL_RATE);
+  delay(INITIAL_DELAY);
 
-  Serial.print(F("--> Initializing the Bluefruit LE module: "));
-  if (!ble.begin(VERBOSE_MODE)) { error(F("ERROR: Could not find the module.")); }
-  Serial.println(F("OK!"));
-
-  ble.disconnect();
-
-  /* Perform a factory reset to make sure everything is in a known state. */
-  if (FACTORYRESET_ENABLE) {
-    Serial.print(F("--> Performing a factory reset: "));
-    if (!ble.factoryReset()){ error(F("ERROR: Could not factory reset.")); }
-    Serial.println(F("OK!"));
-  }
-
-  /* Disable command echo from Bluefruit. */
-  ble.echo(false);
-
-  /* Print Bluefruit information. */
-  Serial.println("--> Requesting Bluefruit info:");
-  ble.info();
-
-  /* Change the device name to make it easier to find. */
-  Serial.print(F("--> Setting device name to 'PlayStation Controller': "));
-  if (!ble.sendCommandCheckOK(F("AT+GAPDEVNAME=PlayStation Controller"))) { error(F("ERROR: Could not set device name.")); }
-  Serial.println(F("OK!"));
-
-  /* Enable HID Service. */
-  Serial.print(F("--> Enabling HID service: "));
-  if (!ble.sendCommandCheckOK(F("AT+BLEHIDEN=1"))) { error(F("ERROR: Could not enable HID keyboard service.")); }
-  Serial.println(F("OK!"));
-
-  /* Adding or removing requires a reset. */
-  Serial.print(F("--> Performing a SW reset: "));
-  if (!ble.reset()) { error(F("ERROR: Could not reset.")); }
-  Serial.println(F("OK!"));
-
-  Serial.print("--> Initializing & configuring gamepad: ");
   uint8_t gamepadError = gamepad.config_gamepad(PSX_CLK, PSX_CMD, PSX_ATT, PSX_DAT, false, false);
-  if (gamepadError) { error(F("ERROR: Could not configure gamepad.")); }
-  Serial.println(F("OK!"));
-
-  Serial.println(F("------------------------------------------------"));
-  Serial.println(F("====== Gamepad fully configured and ready ======"));
+  if (gamepadError) { return error(F("ERROR: Could not configure gamepad.")); }
+  isGamepadInitialized = true;
 }
 /*********************************************************************************/
 
@@ -165,55 +98,63 @@ void setup(void) {
 /*********************************************************************************/
 void loop() {
   delay(GAMEPAD_READ_DELAY);
-  
-  gamepad.read_gamepad(false, 0);
 
-  // Reset pressed key codes.
-  memset(pressedKeyCodes, 0, sizeof(pressedKeyCodes));
+  if (!isGamepadInitialized) { return; }
 
-  // Grab all data.
-  int pressedIndex = 0;
-  getButtonInfo(&pressedIndex, pressedKeyCodes);
-  getJoystickInfo(&pressedIndex, pressedKeyCodes);
+  gamepad.read_gamepad();
+  uint32_t currentButtonState = gamepad.ButtonDataByte();
+  int8_t currentX1 = readAxis(PSS_LX);
+  int8_t currentY1 = readAxis(PSS_LY);
+  int8_t currentX2 = readAxis(PSS_RX);
+  int8_t currentY2 = readAxis(PSS_RY);
 
-  // If the pressed keys are the same as above, don't send an update.
-  if (!memcmp(pressedKeyCodes, previousPressedKeyCodes, sizeof(pressedKeyCodes))) { return; }
+  if (previousButtonState == currentButtonState &&
+    areAxisValuesEqual(previousX1, currentX1) &&
+    areAxisValuesEqual(previousY1, currentY1) &&
+    areAxisValuesEqual(previousX2, currentX2) &&
+    areAxisValuesEqual(previousY2, currentY2)) { return; }
 
-  // Preserve the pressed keys state, to use in the comparison.
-  memcpy(previousPressedKeyCodes, pressedKeyCodes, sizeof(pressedKeyCodes));
+  #ifdef DEBUG_TO_SERIAL
+    Serial.println(String("Axis values: LX=") + currentX1 + " LY= " + currentY1 + " RX=" + currentX2 + " RY= " + currentY2);
+    if (gamepad.Button(PSB_TRIANGLE)) { Serial.println("PSB_TRIANGLE was pressed"); }
+    if (gamepad.Button(PSB_CIRCLE)) { Serial.println("PSB_CIRCLE was pressed"); }
+    if (gamepad.Button(PSB_CROSS)) { Serial.println("PSB_CROSS was pressed"); } 
+    if (gamepad.Button(PSB_SQUARE)) { Serial.println("PSB_SQUARE was pressed"); }
+    if (gamepad.Button(PSB_PAD_UP)) { Serial.println("PSB_PAD_UP was pressed"); }
+    if (gamepad.Button(PSB_PAD_RIGHT)) { Serial.println("PSB_PAD_RIGHT was pressed"); }
+    if (gamepad.Button(PSB_PAD_DOWN)) { Serial.println("PSB_PAD_DOWN was pressed"); }
+    if (gamepad.Button(PSB_PAD_LEFT)) { Serial.println("PSB_PAD_LEFT was pressed"); }
+    if (gamepad.Button(PSB_L1)) { Serial.println("PSB_L1 was pressed"); }
+    if (gamepad.Button(PSB_L2)) { Serial.println("PSB_L2 was pressed"); }
+    if (gamepad.Button(PSB_R1)) { Serial.println("PSB_R1 was pressed"); }
+    if (gamepad.Button(PSB_R2)) { Serial.println("PSB_R2 was pressed"); }
+    if (gamepad.Button(PSB_SELECT)) { Serial.println("PSB_SELECT was pressed"); }
+    if (gamepad.Button(PSB_START)) { Serial.println("PSB_START was pressed"); }
+  #endif
 
-  // We support max 5 pressed buttons, so grab the first five and send them to the BLE.
-  String command = String("AT+BLEKEYBOARDCODE=00-00");
-  for (int i = 0; i < 5; i++) {
-    command += String("-") + printHex(pressedKeyCodes[i]);
-  }
-  
-//  Serial.print("Sending key code '");
-//  Serial.print(command);
-//  Serial.println("': ");
-  
-  ble.println(command);
-  if (ble.waitForOK()) { Serial.println(F("OK!")); }
-  else { Serial.println(F("FAILED!")); }
+  previousButtonState = currentButtonState;
+  previousX1 = currentX1;
+  previousY1 = currentY1;
+  previousX2 = currentX2;
+  previousY2 = currentY2;
+
+  transmitGamepadStateToBT(currentButtonState, currentX1, currentY1, currentX2, currentY2);
 }
+/*********************************************************************************/
 
-void getButtonInfo(int* pressedIndex, int pressedKeys[]) {
-  unsigned int currentButtonState = gamepad.ButtonDataByte();
-  if (buttonState == currentButtonState) { return; }
-  buttonState = currentButtonState;
 
-  for (int i = 0; i < 14; i++) {
-    if (!gamepad.Button(buttons[i])) { continue; }
-    pressedKeyCodes[*pressedIndex] = buttonKeyCodes[i];
-    (*pressedIndex)++;
-  }
-}
-
-void getJoystickInfo(int* pressedIndex, int pressedKeys[]) {
-  for (int i = 0; i < 8; i++) {
-    int value = gamepad.Analog(joystickAxis[i]);
-    if (value < joystickLimits[i][0] || joystickLimits[i][1] < value)  { continue; }
-    pressedKeyCodes[*pressedIndex] = joystickKeyCodes[i];
-    (*pressedIndex)++;
-  }
+// TRANSMISSION
+/*********************************************************************************/
+void transmitGamepadStateToBT(uint32_t buttonState, int8_t x1, int8_t y1, int8_t x2, int8_t y2)
+{
+  BTSerial.write((uint8_t)0xFD);
+  BTSerial.write((uint8_t)0x06);
+  BTSerial.write((uint8_t)x1);
+  BTSerial.write((uint8_t)y1);
+  BTSerial.write((uint8_t)x2);
+  BTSerial.write((uint8_t)y2);
+  uint8_t buttonState1 = buttonState & 0xFF;
+  uint8_t buttonState2 = (buttonState >> 8) & 0xFF;
+  BTSerial.write((uint8_t)buttonState1);
+  BTSerial.write((uint8_t)buttonState2);
 }
