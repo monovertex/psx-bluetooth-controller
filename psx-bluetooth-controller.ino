@@ -41,7 +41,7 @@
 #define SERIAL_RATE         9600
 #define BT_SERIAL_RATE      9600
 #define INITIAL_DELAY       500
-#define DEBUG_TO_SERIAL
+// #define DEBUG_TO_SERIAL // Uncomment this to print debug statements.
 /*********************************************************************************/
 
 
